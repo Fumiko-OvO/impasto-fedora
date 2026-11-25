@@ -1,0 +1,116 @@
+# ╭──────────────────────────────────────────────────────────────────────────╮
+# │                                                                          │
+# │   T H I R D - P A R T Y                                                  │
+# │   fedora packages from outside the official repositories                 │
+# │                                                                          │
+# │   github.com/andreumassanet/impasto                                      │
+# │                                                                          │
+# ╰──────────────────────────────────────────────────────────────────────────╯
+
+# · What Fedora's repositories do not carry, offered by `./setup packages`
+# · after dnf.txt is done. One entry a line of seven tab-separated fields:
+#
+# ·   type   source   name   consent   required   pins   description
+#
+# · type     copr, yumrepo, rpm, tarball, source, flatpak, pip-venv, npm or
+# ·          optin.
+# · source   owner/project for a copr, the URL for the rest, flathub for a
+# ·          flatpak.
+# · consent  required — asked about once with the registry, and the desk does
+# ·                   not go on without what it answers for.
+# ·          optional — asked about with it; skipped on a no.
+# ·          optin — never installed by a plain install, only said and
+# ·                  pointed at; nothing lands unannounced.
+# · required yes — when this ends up missing (declined, failed, unavailable)
+# ·          the install stops before anything is deployed, with the reason.
+# · pins     key=value pairs, comma separated, no spaces around the commas:
+# ·            tag= commit=   what a source entry checks out
+# ·            sha256=        what a download must hash to, or it is refused
+# ·            dest=          where an archive, a file or a repo file lands
+# ·            pick=          a file inside an archive, copied to dest= as
+# ·                           NAME (inside:outside renames it)
+# ·            has=           the file or folder under dest= that answers
+# ·                           for the entry once it is there
+# ·            fc=            the font family fc-list looks for
+# ·            bins=          what a build produced, copied onto the PATH
+# ·            cmd=           how a source entry builds, run from its tree
+# ·            tool=          the tool that build needs, checked first
+# ·            prefix= venv= module=   where npm and pip things live
+# ·            baseurl= gpgkey=       a yumrepo's address and its signing
+# ·                                   key; a repository whose key impasto
+# ·                                   cannot check is never added
+# ·            sig=           unsigned, for an RPM that is refused outright
+#
+# · Whether something is wanted is answered by a person: --noconfirm and a
+# · terminal that cannot ask skip the whole registry and say what was skipped,
+# · and --noconfirm never counts as a yes. An unsigned RPM is refused, never
+# · installed with --nogpgcheck. Nothing is fetched that is not pinned, and
+# · a checksum that does not match is refused, not installed. An entry a
+# · person installed another way is detected and kept.
+
+
+# ── DESKTOP ─────────────────────────────────────────────────────────────────
+
+copr	nett00n/hyprland	hyprland	required	yes	-	the compositor and hyprctl; Fedora has no build and the COPR carries one for Fedora 45. Declining it stops the install before anything is deployed
+copr	nett00n/hyprland	hyprcursor	optional	no	-	hyprcursor-util, which ./setup cursors compiles with
+
+source	https://codeberg.org/LGFae/awww	awww	required	yes	tag=v0.12.1,cmd=cargo build --release,tool=cargo,bins=awww awww-daemon	the wallpaper; Fedora has no package, so it builds from the pinned tag with the toolchain dnf.txt installs. A person who already has it from anywhere keeps theirs
+
+
+# ── LOOK ────────────────────────────────────────────────────────────────────
+
+tarball	https://github.com/ryanoasis/nerd-fonts/releases/download/v3.4.0/JetBrainsMono.tar.xz	jetbrains-mono-nerd	required	no	sha256=ef552a3e638f25125c6ad4c51176a6adcdce295ab1d2ffacf0db060caf8c1582,dest=~/.local/share/fonts,fc=JetBrainsMono Nerd	the terminal's type and every glyph on the bar; Fedora ships plain JetBrains Mono, not the Nerd variant. Refusing it leaves boxes on the bar, and the install says so
+tarball	https://github.com/ful1e5/Bibata_Cursor/releases/download/v2.0.7/Bibata-Modern-Classic.tar.xz	bibata-modern-classic	optional	no	sha256=7d3495864e5bbef02f5e77de760b2905903b63c71495a78ef6306d19a3b556d8,dest=~/.local/share/icons,has=Bibata-Modern-Classic	the XCursor theme env.lua names, for clients with no hyprcursor; ./setup cursors still recolours its own from Bibata's SVGs
+
+source	https://github.com/vinceliuice/WhiteSur-icon-theme	whitesur-icon-theme	optional	no	tag=2026-09-10,cmd=./install.sh,tool=make,dest=~/.local/share/icons,has=WhiteSur-dark	the shell's application icons; its install script comes out of the pinned tree, never from a pipe
+
+
+# ── WALLPAPER ───────────────────────────────────────────────────────────────
+
+copr	nett00n/hyprland	mpvpaper	optional	no	-	plays an animated wallpaper
+
+
+# ── CAPTURE ─────────────────────────────────────────────────────────────────
+
+copr	nett00n/hyprland	satty	optional	no	-	annotating a screenshot
+
+source	https://github.com/rosalyntg/wl-screenrec	wl-screenrec	optional	no	tag=v0.3.2,cmd=cargo build --release,tool=cargo,bins=wl-screenrec	the recorder's GPU encoder, tried before wf-recorder; no Fedora package carries it
+
+flatpak	flathub	re.fossplant.songrec	optional	no	-	the Song tile, naming what is playing; the consent above covers adding the Flathub remote, which impasto otherwise never touches
+
+
+# ── QUICK CONTROLS ──────────────────────────────────────────────────────────
+
+copr	nett00n/hyprland	hyprpicker	optional	no	-	the colour under the pointer
+copr	nett00n/hyprland	hyprsunset	optional	no	-	the night light
+copr	nett00n/hyprland	hyprshutdown	optional	no	-	SUPER + SHIFT + E exits through it, if installed
+
+pip-venv	recurring-ical-events==3.8.2	recurring-ical-events	optional	no	venv=~/.local/share/impasto/venv-calendar,module=recurring_ical_events	the calendar links, repeating events included, in an isolated venv the shell points python at
+
+
+# ── TERMINAL PROGRAMS ───────────────────────────────────────────────────────
+
+copr	lihaohong/yazi	yazi	optional	no	-	the file manager in the terminal; the COPR builds it for Fedora 45
+copr	nett00n/hyprland	imv	optional	no	-	what yazi and the photo widget hand a picture to
+
+tarball	https://robobunny.com/projects/asciiquarium/asciiquarium	asciiquarium	optional	no	sha256=f3afa00cdcea5cc5e4f2c22ee987bc10eddc5f41a56ec4836ef3e4011999e65a,dest=~/.local/bin,has=asciiquarium	one Perl script; it needs Perl's Term::Animation, which is not packaged, and says so when it is not there
+tarball	https://github.com/will8211/unimatrix/archive/dff519f972103f91384f360f270614184de8aa92.tar.gz	unimatrix	optional	no	sha256=ebe7ed201eed651ebea2a1608245b7e2cb2089f8ee152f7059d8ff9d01044e24,dest=~/.local/bin,pick=unimatrix.py:unimatrix,has=unimatrix	the matrix alias; one Python script, copied onto the PATH
+
+source	https://gitlab.com/jallbrit/cbonsai	cbonsai	optional	no	tag=v1.4.2,cmd=make,tool=make,bins=cbonsai	the bonsai alias
+source	https://github.com/xorg62/tty-clock	tty-clock	optional	no	tag=v2.3,cmd=make,tool=make,bins=tty-clock	the clock alias
+source	https://github.com/AngelJumbo/lavat	lavat	optional	no	tag=v3.0.0,cmd=go build,tool=go,bins=lavat	the lava function; built with the Go toolchain, which impasto does not install for a toy
+
+
+# ── EDITOR ──────────────────────────────────────────────────────────────────
+
+npm	pyright@1.1.414	pyright	optional	no	prefix=~/.local	the Python type checker lsp.lua prefers
+npm	bash-language-server@5.8.1	bash-language-server	optional	no	prefix=~/.local	the shell's language server
+
+
+# ── THEMED APPLICATIONS ─────────────────────────────────────────────────────
+
+yumrepo	https://download.vscodium.com/rpms	codium	optional	no	dest=/etc/yum.repos.d/vscodium.repo,baseurl=https://download.vscodium.com/rpms,gpgkey=https://gitlab.com/paulcarroty/vscodium-deb-rpm-repo/-/raw/master/pub.gpg	extensions and settings · ./setup vscodium. The repository file impasto writes carries the signing key, so dnf verifies every package it brings
+
+rpm	https://github.com/Vencord/Vesktop/releases	vesktop	optional	no	sig=unsigned	upstream RPM carries no signing key, so impasto refuses it rather than turning dnf's checks off: install it by hand from vesktop.app if it is wanted
+
+optin	-	spotify	optin	no	-	the player the palette patches · ./setup spotify. It wants RPM Fusion's Nonfree repository for its lpf-spotify-client bootstrap, or the Flathub app com.spotify.Client — neither is ever enabled without a yes at the keyboard

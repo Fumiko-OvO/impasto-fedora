@@ -1,0 +1,197 @@
+# ╭──────────────────────────────────────────────────────────────────────────╮
+# │                                                                          │
+# │   D N F                                                                  │
+# │   packages from the official Fedora repositories                         │
+# │                                                                          │
+# │   github.com/andreumassanet/impasto                                      │
+# │                                                                          │
+# ╰──────────────────────────────────────────────────────────────────────────╯
+
+# · The Fedora counterpart of pacman.txt: `./setup packages` installs
+# · whatever is missing with `dnf install`. `#` starts a comment anywhere on
+# · a line, a commented-out line is skipped, and a line starting with `@` is
+# · a DNF group. The first two sections are required; each later one is a
+# · feature that disables itself when its packages are missing.
+#
+# · Fedora's repositories do not carry Hyprland itself, awww, the Hyprland
+# · tools, or several of the smaller things: those are answered for in
+# · fedora-third-party.txt, which `./setup packages` offers after this one.
+# · Nothing outside Fedora's own repositories is installed from here.
+
+
+# ── DESKTOP ─────────────────────────────────────────────────────────────────
+
+quickshell                   # the shell: the bar, the island, the lock, notifications
+imagemagick                  # the palette board
+python3                      # every backend in scripts/
+python3-pip                  # venvs for the calendar, and pip builds
+git                          # setup's own clones, ./setup cursors, lazy.nvim
+grim                         # the capture's photograph, and the lock screen's
+dbus                         # dbus-monitor, which hears logind about to sleep
+wl-clipboard                 # copying, and the clipboard's history
+gtk3                         # gtk-launch, which the launcher opens applications with
+libnotify                    # notify-send, which the timer rings with
+fontconfig                   # fc-list, in fonts.py
+pipewire                     # the volume, through Quickshell's Pipewire service
+wireplumber                  # wpctl, which the media keys call
+playerctl                    # the play, pause, next and previous keys
+xdg-desktop-portal-hyprland  # screen sharing · the registry's COPR may ship a newer one
+xdg-desktop-portal-gtk       # every Open dialog
+xdg-user-dirs                # the folders a capture lands in
+xdg-utils                    # xdg-open, which yazi hands the rest to
+qt6ct                        # the platform theme env.lua names
+qt6-qtmultimedia             # the camera panel's preview, with its ffmpeg backend
+papirus-icon-theme           # what the impasto icon theme inherits
+breeze-icon-theme            # the weather in full colour, when chosen
+rsms-inter-fonts             # the shell's type, and the greeter's
+# · Fedora ships JetBrains Mono, but not the Nerd glyph variant the bar and
+# · the terminal draw with: fedora-third-party.txt fetches it, pinned.
+adwaita-sans-fonts           # the GTK windows' type
+adwaita-mono-fonts           # the GTK windows' mono type, with adwaita-sans-fonts
+google-noto-sans-vf-fonts    # the scripts the three above do not cover
+google-noto-color-emoji-fonts # emoji, in colour
+unicode-emoji                # the emoji and their groups, for the launcher
+unicode-cldr-annotations     # their names and keywords, in every language
+iso-codes                    # country names, for the flags
+google-noto-sans-cjk-ttc-fonts
+google-noto-serif-cjk-ttc-fonts  # Chinese, Japanese and Korean, and their punctuation
+# · awww is built from source by fedora-third-party.txt — Fedora has no
+# · package — so the toolchain it compiles with is required too.
+gcc                          # awww's build compiles its C glue
+cargo                        # awww is Rust, released on Codeberg
+wayland-devel                # awww draws through the layer-shell protocol
+lz4-devel                    # awww compresses its frames with lz4
+pkgconf-pkg-config           # pkg-config, which awww's build asks where those are
+
+
+# ── TERMINAL ────────────────────────────────────────────────────────────────
+
+kitty
+zsh
+starship
+less                         # kitty's scrollback pager, which base does not bring
+
+
+# ── QUICK CONTROLS ──────────────────────────────────────────────────────────
+
+brightnessctl                # the laptop panel's brightness
+ddcutil                      # an external monitor's, over DDC/CI
+NetworkManager               # the network tile, and nmcli
+bluez                        # the bluetooth tile · bluetoothctl comes with it
+power-profiles-daemon        # the power profile
+upower                       # the battery
+# · hyprsunset, hyprpicker and hyprshutdown come from fedora-third-party.txt,
+# · built by the Hyprland COPR.
+khal                         # calendars synced with vdirsyncer, read when set up
+ydotool                      # the on-screen keyboard's keys, through uinput
+# · python-recurring-ical-events comes from fedora-third-party.txt, into its
+# · own venv: Fedora packages its dependencies but not the plugin.
+
+
+# ── CAPTURE ─────────────────────────────────────────────────────────────────
+
+# · satty comes from fedora-third-party.txt, with the Hyprland COPR.
+tesseract                    # reading a region as text
+tesseract-langpack-eng       # in English · one tesseract-langpack-* per language
+wf-recorder                  # recording · wl-screenrec, in the registry, goes first
+pulseaudio-utils             # pactl, which finds the output a recording hears
+pipewire-pulse               # what pactl talks to
+# · songrec comes from fedora-third-party.txt, as a Flatpak: Fedora does not
+# · package it.
+
+
+# ── TERMINAL PROGRAMS ───────────────────────────────────────────────────────
+
+fzf                          # .zshrc reaches for it, and fzf-lua needs it
+zoxide                       # .zshrc reaches for it if it is there
+fnm                          # the same
+fastfetch                    # the greeting, on `fa`
+btop                         # themed by the palette push
+cava                         # the same, and the bar's visualiser
+# · yazi and imv come from fedora-third-party.txt, from COPRs that build them.
+mpv                          # what yazi hands a video or a song to
+ffmpeg-free                  # an animated wallpaper's still, for its palette
+# · asciiquarium comes from fedora-third-party.txt: it is one Perl script.
+
+
+# ── EDITOR ──────────────────────────────────────────────────────────────────
+
+neovim
+# · tree-sitter-cli is not packaged in Fedora; nvim-treesitter compiles its
+# · parsers with gcc, which the Hyprland-plugins section brings.
+ripgrep                      # the grep picker
+fd-find                      # the file picker
+lua-language-server          # each server starts only if its binary is there
+# · pyright and bash-language-server come from fedora-third-party.txt, as
+# · npm packages under ~/.local, whose bins are already on the PATH.
+ruff                         # the Python linter
+nodejs                       # npm, which the two language servers install with
+qt6-qtdeclarative-devel      # qmlls6 · quickshell brings the runtime anyway
+
+
+# ── FILE MANAGER ────────────────────────────────────────────────────────────
+
+nautilus                     # SUPER + E
+nautilus-python              # its right-click menu
+ffmpegthumbnailer            # a video's thumbnail
+gvfs                         # the trash, and mounting
+
+
+# ── PRINTING ────────────────────────────────────────────────────────────────
+
+cups                         # the print server every Print dialog asks · ./setup system
+cups-filters                 # turns what is printed into what a printer reads
+ghostscript                  # which those filters render a PDF with, and do not bring
+ipp-usb                      # a modern USB printer, without a driver
+avahi                        # finds the printers on the network
+nss-mdns                     # resolves their .local names
+gutenprint                   # drivers for older printers, the ones that need one
+system-config-printer        # adds a printer, in a window
+cups-pk-helper               # lets that window do it without root
+
+
+# ── QT ──────────────────────────────────────────────────────────────────────
+
+polkit-kde                   # the password dialog when the shell cannot be the agent
+kf6-kconfig                  # kreadconfig6, for the KDE half of the palette
+
+
+# ── CURSOR ──────────────────────────────────────────────────────────────────
+
+# · hyprcursor comes from fedora-third-party.txt, with the Hyprland COPR;
+# · ./setup cursors compiles with its hyprcursor-util.
+
+
+# ── HYPRLAND PLUGINS ────────────────────────────────────────────────────────
+
+# · hyprpm ships with hyprland itself, which the registry installs.
+@c-development               # the compiler hyprpm and nvim-treesitter build with
+cmake
+meson
+cpio
+
+
+# ── LOGIN SCREEN ────────────────────────────────────────────────────────────
+
+sddm                         # ./setup system
+plymouth                     # the boot splash · ./setup splash
+plymouth-plugin-script       # the script plugin, which Fedora splits out of plymouth
+accountsservice              # the account's full name, which both screens show
+
+
+# ── FACE UNLOCK ─────────────────────────────────────────────────────────────
+
+v4l-utils                    # v4l2-ctl, which ./setup face and Settings find the infrared camera with
+
+
+# ── VIRTUAL MACHINES ────────────────────────────────────────────────────────
+
+quickemu                     # the machines panel · the shell also wants quickget and spicy
+qemu-kvm                     # the qemu quickemu runs
+spice-gtk-tools              # spicy, the viewer the machines open
+
+
+# ── DEVELOPMENT ─────────────────────────────────────────────────────────────
+
+lua                          # luac, for ./setup check
+inotify-tools                # ./setup sync --watch, which copies every save

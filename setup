@@ -25,6 +25,28 @@ COMPOSITOR=$REPO/home/.config/quickshell/scripts/compositor.py
 ROOT=${IMPASTO_ROOT:-/}
 ROOT=${ROOT%/}
 
+# The distribution decides which package lists are read and which manager
+# runs. Only Arch Linux and Fedora are supported, and only /etc/os-release
+# says which this is: an unknown or unsupported distribution is never taken
+# for either.
+DISTRO=$( (. /etc/os-release 2>/dev/null && printf '%s' "$ID") || true)
+PRETTY=$( (. /etc/os-release 2>/dev/null && printf '%s' "${PRETTY_NAME:-$ID}") || true)
+VARIANT_ID=$( (. /etc/os-release 2>/dev/null && printf '%s' "${VARIANT_ID:-}") || true)
+case $DISTRO in
+    arch)   PKGMAN=pacman ;;
+    fedora) PKGMAN=dnf ;;
+    *)      PKGMAN= ;;
+esac
+# Fedora's Atomic desktops install as images managed by rpm-ostree, and
+# impasto writes /etc and /usr file by file, which the image model undoes:
+# they are refused early rather than half-installed. Decided by deployment
+# markers and OS metadata, never by which binaries happen to exist.
+ATOMIC=0
+case $VARIANT_ID in
+    silverblue|kinoite|sericea|onyx|vauxite|coreos|iot) ATOMIC=1 ;;
+esac
+if [[ -e /run/ostree-booted || -d /sysroot/ostree ]]; then ATOMIC=1; fi
+
 DRY=0
 NOCONFIRM=0
 WATCH=0
@@ -152,8 +174,8 @@ banner() {
     BANNERED=1
     printf '\n'
     mark
-    printf '\n  %sa desk for Arch Linux and Hyprland%s   %s%s%s\n\n' \
-        "$MUTED" "$OFF" "$FAINT" "$(version)" "$OFF"
+    printf '\n  %sa desk for %s and Hyprland%s   %s%s%s\n\n' \
+        "$MUTED" "${PRETTY:-Arch Linux}" "$OFF" "$FAINT" "$(version)" "$OFF"
 }
 
 usage() {
@@ -168,7 +190,8 @@ Usage: ./setup <command> [options]
   uninstall   remove every installed file that has not been edited since,
               and put back what was in the way when it was installed
 
-  packages    install what packages/pacman.txt and packages/aur.txt list
+  packages    install what the lists in packages/ name: pacman.txt and aur.txt
+              on Arch, dnf.txt and the third-party registry on Fedora
   sync        copy home/ into $HOME — how a change in the repository lands
   system      copy system/ into /, switch the login screen on where no
               other display manager is, and printing (asks for a password)
@@ -213,8 +236,9 @@ Options:
                       sync and Settings keep to it
   --full              install, update, sync: everything again, and forget
                       --shell-only
-  --aur-helper NAME   yay or paru. The one installed is used, and when there
-                      is neither, this one is built from the AUR (yay if unset)
+  --aur-helper NAME   yay or paru — an Arch thing: the one installed is used,
+                      and when there is neither, this one is built from the
+                      AUR. Accepted and unused on Fedora
   --noconfirm         answer every question with its default
   -n, --dry-run       say what would change, and change nothing
   -w, --watch         sync: copy again every time a file under home/ is saved
@@ -478,6 +502,15 @@ gone() {
     return 1
 }
 
+# Whether a package owns a path: pacman -Qqo on Arch, rpm -qf on Fedora.
+package_owns() {
+    if [[ $PKGMAN == dnf ]]; then
+        rpm -qf "$1" >/dev/null 2>&1
+    else
+        pacman -Qqo "$1" >/dev/null 2>&1
+    fi
+}
+
 # Empty directories left behind, removed upwards — never the XDG roots, and
 # never a directory a package owns.
 tidy() {
@@ -486,7 +519,7 @@ tidy() {
         case $dir in
             .config|.local|.local/share|.local/state|.cache|etc|usr|usr/share|var|var/lib) return 0 ;;
         esac
-        if [[ -n $SUDO ]] && pacman -Qqo "$target/$dir" >/dev/null 2>&1; then return 0; fi
+        if [[ -n $SUDO ]] && package_owns "$target/$dir"; then return 0; fi
         act $SUDO rmdir "$target/$dir" 2>/dev/null || return 0
         dir=$(dirname "$dir")
     done
@@ -807,6 +840,10 @@ verb_watch() {
 # into a 0700 home. Develop the greeter with `sddm-greeter-qt6 --test-mode`
 # against the working tree.
 verb_system() {
+    if [[ $DISTRO == fedora ]]; then
+        say 'not ported  ./setup system drives sddm, printing and PAM the Arch way; the Fedora port comes with the next stage'
+        return 0
+    fi
     section system
     SUDO=sudo
     if [[ -w ${ROOT:-/} ]]; then SUDO=; fi
@@ -902,6 +939,13 @@ names() { sed 's/#.*//' "$1" | tr -s ' \t' '\n' | sed '/^$/d'; }
 
 # `pacman -T` also counts providers, so e.g. fnm-bin satisfies fnm.
 verb_packages() {
+    case $PKGMAN in
+        pacman) verb_packages_arch ;;
+        dnf)    verb_packages_fedora ;;
+    esac
+}
+
+verb_packages_arch() {
     local -a yes=() want missing
     if (( NOCONFIRM )); then yes=(--noconfirm); fi
 
@@ -925,6 +969,445 @@ verb_packages() {
     say "missing: ${missing[*]}"
     aur_helper || return 0
     act "$HELPER" -S --needed "${yes[@]}" "${missing[@]}"
+}
+
+# rpm answers a whole list in one go: `name-version-release` a line, and
+# `package name is not installed` for what is missing.
+missing_dnf() {
+    local out
+    out=$(rpm -q "$@" 2>&1) || true
+    sed -n 's/^package \(.*\) is not installed$/\1/p' <<< "$out"
+}
+
+# dnf installs what is missing in one transaction; the @-prefixed lines of
+# dnf.txt are groups, which go through `dnf group install` and are checked
+# against `dnf group list --installed`, never against rpm -q. After the
+# repositories, what Fedora does not carry is offered from the registry.
+verb_packages_fedora() {
+    local -a want missing groups pkgs rows
+    local row installed_groups
+    if (( NOCONFIRM )); then
+        say 'kept     --noconfirm: the third-party registry is skipped, and never authorised by it'
+    fi
+    if [[ -n $HELPER ]]; then
+        say "kept     --aur-helper $HELPER — an Arch thing, and nothing here"
+    fi
+
+    section dnf
+    mapfile -t want < <(names "$REPO/packages/dnf.txt")
+    groups=() pkgs=()
+    for row in "${want[@]}"; do
+        case $row in @*) groups+=("${row#@}") ;; *) pkgs+=("$row") ;; esac
+    done
+    mapfile -t missing < <(missing_dnf "${pkgs[@]}")
+    installed_groups=$(dnf group list --installed --quiet 2>/dev/null || true)
+    for row in "${groups[@]}"; do
+        grep -qw "$row" <<< "$installed_groups" || missing+=("@$row")
+    done
+    if (( ${#missing[@]} )); then
+        say "missing: ${missing[*]}"
+        for row in "${missing[@]}"; do
+            if [[ $row == @* ]]; then act sudo dnf group install -y "$row"; fi
+        done
+        if (( ${#pkgs[@]} )); then
+            local -a plain=()
+            for row in "${missing[@]}"; do
+                [[ $row == @* ]] || plain+=("$row")
+            done
+            if (( ${#plain[@]} )); then act sudo dnf install -y "${plain[@]}"; fi
+        fi
+    else
+        say "all ${#want[@]} installed"
+    fi
+
+    verb_third_party
+}
+
+
+# ── THIRD PARTY (FEDORA) ────────────────────────────────────────────────────
+#
+# fedora-third-party.txt, described at its top: typed entries from outside
+# Fedora's repositories, each pinned, each asked about, none of them
+# authorised by --noconfirm.
+
+TP_FILE=$REPO/packages/fedora-third-party.txt
+TP_DIR=$HOME/.local/share/impasto/third-party
+declare -A TP_PIN=()
+TP_ASKED=0
+
+# The entries, in the file's order.
+tp_entries() {
+    local line
+    while IFS= read -r line; do
+        [[ $line == \#* || -z $line ]] && continue
+        printf '%s\n' "$line"
+    done < "$TP_FILE"
+}
+
+# `a=b,c=d` into the TP_PIN map.
+tp_pins() {
+    local rest=$1 key value
+    TP_PIN=()
+    [[ $rest == - || -z $rest ]] && return 0
+    while [[ -n $rest ]]; do
+        key=${rest%%=*}
+        rest=${rest#*=}
+        if [[ $rest == *,* ]]; then value=${rest%%,*}; rest=${rest#*,}; else value=$rest; rest=; fi
+        TP_PIN[$key]=$value
+    done
+}
+
+# Whether the entry is already on the machine, however it got there.
+tp_have() {  # $1 type, $2 name, $3 pins
+    local type=$1 name=$2 venv
+    tp_pins "$3"
+    case $type in
+        copr|rpm|yumrepo)
+            rpm -q "$name" >/dev/null 2>&1 && return 0 ;;
+        flatpak)
+            # Both installation scopes: a system flatpak is as present as a
+            # user one.
+            if command -v flatpak >/dev/null; then
+                flatpak --user info "$name" >/dev/null 2>&1 && return 0
+                flatpak --system info "$name" >/dev/null 2>&1 && return 0
+            fi ;;
+        pip-venv)
+            venv=${TP_PIN[venv]/~/$HOME}
+            if [[ -x $venv/bin/python ]]; then
+                "$venv/bin/python" -c "import ${TP_PIN[module]}" >/dev/null 2>&1 && return 0
+            fi ;;
+        npm)
+            [[ -x ${TP_PIN[prefix]/~/$HOME}/bin/$name ]] && return 0 ;;
+    esac
+    [[ -e $TP_DIR/$name ]] && return 0
+    if [[ -n ${TP_PIN[fc]:-} ]] && fc-list 2>/dev/null | grep -qi "${TP_PIN[fc]}"; then
+        return 0
+    fi
+    if [[ -n ${TP_PIN[bins]:-} ]]; then
+        local bin
+        for bin in ${TP_PIN[bins]}; do
+            command -v "$bin" >/dev/null 2>&1 || return 1
+        done
+        return 0
+    fi
+    if [[ -n ${TP_PIN[has]:-} && -n ${TP_PIN[dest]:-} ]]; then
+        [[ -e ${TP_PIN[dest]/~/$HOME}/${TP_PIN[has]} ]] && return 0
+    fi
+    return 1
+}
+
+tp_stamp() {  # $1 name, $2 where it came from
+    if (( ! DRY )); then
+        mkdir -p "$TP_DIR"
+        printf '%s\n' "$2" > "$TP_DIR/$1"
+    fi
+}
+
+tp_fetch() {  # $1 url, $2 file
+    act curl -fL --retry 2 --create-dirs -o "$2" "$1"
+}
+
+tp_verify() {  # $1 file, $2 wanted sha256
+    [[ $(sha256sum "$1" 2>/dev/null | awk '{print $1}') == "$2" ]]
+}
+
+tp_unpack() {  # $1 archive, $2 workdir
+    case $1 in
+        *.tar.gz|*.tgz) tar -xzf "$1" -C "$2" ;;
+        *.tar.xz|*.txz) tar -xJf "$1" -C "$2" ;;
+        *.tar.bz2)      tar -xjf "$1" -C "$2" ;;
+        *) return 1 ;;
+    esac
+}
+
+tp_failed()      { say "stopped  — $*"; }
+tp_unavailable() { say "missing  — $*"; }
+
+# Which repository an installed RPM really came from. rpm itself does not
+# remember; dnf5 does, and repoquery reports it with %{from_repo}.
+tp_origin() {  # $1 package → its repository, empty when unknown
+    dnf repoquery --installed --queryformat '%{from_repo}' "$1" 2>/dev/null | head -n 1
+}
+
+tp_install_copr() {
+    # The COPR itself is what the consent above was for: one yes covers every
+    # package it builds, and the repository stays for as long as the person
+    # leaves it.
+    if ! grep -qs "copr.fedorainfracloud.org/results/$TP_SOURCE/" /etc/yum.repos.d/*.repo; then
+        if ! dnf copr --help >/dev/null 2>&1; then
+            say 'missing  dnf5-plugins, which brings the copr command'
+            act sudo dnf install -y dnf5-plugins \
+                || { tp_failed 'dnf5-plugins could not be installed'; return 2; }
+        fi
+        act sudo dnf copr enable -y "$TP_SOURCE" \
+            || { tp_failed "the $TP_SOURCE COPR could not be enabled"; return 2; }
+        say "enabled  the $TP_SOURCE COPR"
+    fi
+    act sudo dnf install -y "$TP_NAME" \
+        || { tp_failed "$TP_NAME could not be installed from the COPR"; return 2; }
+    tp_stamp "$TP_NAME" "copr $TP_SOURCE"
+    say "ok       $TP_NAME"
+    # %{from_repo} says where the RPM really came from: if dnf satisfied the
+    # name somewhere else, the person hears it rather than assuming the COPR.
+    local origin
+    origin=$(tp_origin "$TP_NAME")
+    if [[ -n $origin && $origin != *@copr*${TP_SOURCE//\//.}* ]]; then
+        say "note     $TP_NAME came from $origin, not the $TP_SOURCE COPR"
+    fi
+}
+
+tp_install_yumrepo() {
+    local dest=${TP_PIN[dest]/~/$HOME}
+    # The repository file is written here, from the pinned baseurl and key:
+    # gpgcheck stays on, and dnf verifies every package against it.
+    sudo tee "$dest" >/dev/null <<REPO \
+        || { tp_failed "$dest could not be written"; return 2; }
+[$TP_NAME-repo]
+name=${TP_NAME}
+baseurl=${TP_PIN[baseurl]}
+enabled=1
+gpgcheck=1
+repo_gpgcheck=0
+gpgkey=${TP_PIN[gpgkey]}
+REPO
+    act sudo dnf install -y "$TP_NAME" \
+        || { tp_failed "$TP_NAME could not be installed from its repository"; return 2; }
+    tp_stamp "$TP_NAME" "yumrepo ${TP_PIN[baseurl]}"
+    say "ok       $TP_NAME"
+    # Same as the COPR: an install that dnf satisfied elsewhere (already
+    # installed from another repository, say) is said, not assumed.
+    local origin
+    origin=$(tp_origin "$TP_NAME")
+    if [[ -n $origin && $origin != "$TP_NAME-repo" ]]; then
+        say "note     $TP_NAME came from $origin, not the repository just written"
+    fi
+}
+
+tp_install_rpm() {
+    if [[ ${TP_PIN[sig]:-} == unsigned ]]; then
+        say "skipped  $TP_NAME — its upstream RPM carries no signing key, and dnf's checks are never turned off; install it by hand from $TP_SOURCE"
+    else
+        say "skipped  $TP_NAME — no source whose signatures impasto can check is known for it on Fedora"
+    fi
+    return 1
+}
+
+tp_install_tarball() {
+    local cache=$TP_DIR/cache file work dest=${TP_PIN[dest]/~/$HOME}
+    act mkdir -p "$cache"
+    file=$cache/$(basename "$TP_SOURCE")
+    tp_fetch "$TP_SOURCE" "$file" \
+        || { tp_failed "$TP_NAME could not be fetched from $TP_SOURCE"; return 2; }
+    if [[ -n ${TP_PIN[sha256]:-} ]] && ! tp_verify "$file" "${TP_PIN[sha256]}"; then
+        tp_failed "$TP_NAME does not hash to its pinned sha256 — refusing it"
+        return 2
+    fi
+    case $file in
+        *.tar.gz|*.tgz|*.tar.xz|*.txz|*.tar.bz2)
+            work=$(mktemp -d)
+            tp_unpack "$file" "$work" \
+                || { rm -rf "$work"; tp_failed "$TP_NAME's archive could not be unpacked"; return 2; }
+            act mkdir -p "$dest"
+            if [[ -n ${TP_PIN[pick]:-} ]]; then
+                local inside=${TP_PIN[pick]%%:*} outside=${TP_PIN[pick]#*:}
+                act install -m 755 "$work/$inside" "$dest/$outside" \
+                    || { tp_failed "$TP_NAME could not be put in $dest"; return 2; }
+            else
+                # One folder in the archive means a theme or a cursor: it
+                # moves in whole. Loose files mean a fonts drop: all of it
+                # goes in.
+                local -a root=("$work"/*)
+                if (( ${#root[@]} == 1 )) && [[ -d ${root[0]} ]]; then
+                    act cp -a "${root[0]}" "$dest/" \
+                        || { tp_failed "$TP_NAME could not be put in $dest"; return 2; }
+                else
+                    act cp -a "$work"/. "$dest/" \
+                        || { tp_failed "$TP_NAME could not be put in $dest"; return 2; }
+                fi
+            fi
+            rm -rf "$work" ;;
+        *)
+            act mkdir -p "$dest"
+            act install -m 755 "$file" "$dest/$TP_NAME" \
+                || { tp_failed "$TP_NAME could not be put in $dest"; return 2; } ;;
+    esac
+    tp_stamp "$TP_NAME" "$TP_SOURCE"
+    say "ok       $TP_NAME"
+}
+
+tp_install_source() {
+    local tree=$TP_DIR/build/$TP_NAME
+    local tag=${TP_PIN[tag]:-} commit=${TP_PIN[commit]:-} tool=${TP_PIN[tool]:-}
+    if [[ -n $tool ]] && ! command -v "$tool" >/dev/null 2>&1; then
+        tp_unavailable "$TP_NAME builds with $tool, which is not installed (dnf install $tool)"
+        return 2
+    fi
+    act rm -rf "$tree"
+    act mkdir -p "$tree"
+    if [[ -n $tag ]]; then
+        act git clone -q --depth 1 --branch "$tag" "$TP_SOURCE" "$tree" \
+            || { tp_failed "$TP_SOURCE could not be cloned at $tag"; return 2; }
+    elif [[ -n $commit ]]; then
+        act git init -q "$tree" || { tp_failed "could not start $tree"; return 2; }
+        act git -C "$tree" remote add origin "$TP_SOURCE" \
+            && act git -C "$tree" fetch -q --depth 1 origin "$commit" \
+            && act git -C "$tree" checkout -q FETCH_HEAD \
+            || { tp_failed "$TP_SOURCE could not be fetched at $commit"; return 2; }
+    else
+        tp_unavailable "$TP_NAME pins neither a tag nor a commit"
+        return 2
+    fi
+    ( cd "$tree" && eval "${TP_PIN[cmd]}" ) \
+        || { tp_failed "$TP_NAME's build failed — the reason is above"; return 2; }
+    act mkdir -p "$HOME/.local/bin"
+    local bin from
+    for bin in ${TP_PIN[bins]:-}; do
+        from=$tree/$bin
+        [[ -f $from ]] || from=$tree/target/release/$bin
+        if [[ ! -f $from ]]; then
+            tp_failed "$bin did not come out of $TP_NAME's build"
+            return 2
+        fi
+        act install -m 755 "$from" "$HOME/.local/bin/$bin" \
+            || { tp_failed "$bin could not be put on the PATH"; return 2; }
+    done
+    tp_stamp "$TP_NAME" "$TP_SOURCE"
+    say "ok       $TP_NAME (built from ${tag:+tag $tag}${commit:+commit $commit})"
+}
+
+tp_install_flatpak() {
+    if ! command -v flatpak >/dev/null 2>&1; then
+        tp_unavailable 'flatpak is not installed (dnf.txt brings it)'
+        return 2
+    fi
+    # Flathub is the only remote impasto adds, at user scope, and only under
+    # the consent that got us here.
+    if ! flatpak remotes --user 2>/dev/null | grep -q '^flathub'; then
+        act flatpak --user remote-add --if-not-exists flathub https://dl.flathub.org/repo/flathub.flatpakrepo \
+            || { tp_failed 'the Flathub remote could not be added'; return 2; }
+        say 'enabled  the Flathub remote, at user scope'
+    fi
+    act flatpak --user install -y --noninteractive flathub "$TP_NAME" \
+        || { tp_failed "$TP_NAME could not be installed from Flathub"; return 2; }
+    tp_stamp "$TP_NAME" "flatpak $TP_NAME"
+    say "ok       $TP_NAME"
+}
+
+tp_install_pip() {
+    local venv=${TP_PIN[venv]/~/$HOME}
+    if ! command -v python3 >/dev/null 2>&1; then
+        tp_unavailable 'python3 is not installed'
+        return 2
+    fi
+    if [[ ! -x $venv/bin/python ]]; then
+        act python3 -m venv "$venv" \
+            || { tp_failed "the venv at $venv could not be created"; return 2; }
+        say "seeded   the venv at $venv"
+    fi
+    act "$venv/bin/pip" install --upgrade "$TP_SOURCE" \
+        || { tp_failed "$TP_SOURCE could not be installed into its venv"; return 2; }
+    tp_stamp "$TP_NAME" "$TP_SOURCE"
+    say "ok       $TP_NAME"
+}
+
+tp_install_npm() {
+    if ! command -v npm >/dev/null 2>&1; then
+        tp_unavailable 'npm is not installed (dnf install nodejs)'
+        return 2
+    fi
+    local prefix=${TP_PIN[prefix]/~/$HOME}
+    act mkdir -p "$prefix"
+    act npm install --global --prefix "$prefix" "$TP_SOURCE" \
+        || { tp_failed "$TP_SOURCE could not be installed"; return 2; }
+    tp_stamp "$TP_NAME" "$TP_SOURCE"
+    say "ok       $TP_NAME"
+}
+
+tp_install_optin() {
+    say "optin    $TP_NAME — never installed by this run: $TP_DESC"
+    return 1
+}
+
+tp_install() {  # $1 type, $2 source, $3 name, $4 pins, $5 description
+    case $1 in
+        copr)     tp_install_copr ;;
+        yumrepo)  tp_install_yumrepo ;;
+        rpm)      tp_install_rpm ;;
+        tarball)  tp_install_tarball ;;
+        source)   tp_install_source ;;
+        flatpak)  tp_install_flatpak ;;
+        pip-venv) tp_install_pip ;;
+        npm)      tp_install_npm ;;
+        optin)    tp_install_optin ;;
+        *)        tp_unavailable "unknown type $1"; return 2 ;;
+    esac
+}
+
+# One ask for the whole registry, and never anything else: --noconfirm and a
+# terminal that cannot ask skip it and say so, and answer nothing.
+tp_consent() {  # 0 → go on, 1 → skipped
+    if (( TP_ASKED )); then return 0; fi
+    TP_ASKED=1
+    if (( NOCONFIRM )) || (( ! ATTY )); then
+        say "skipped  the third-party registry: it comes from outside Fedora's repositories, and needs a person to say so"
+        say "         run ./setup packages in a terminal to be asked"
+        return 1
+    fi
+    ask "install what Fedora's repositories do not carry? This enables external repositories (the Hyprland COPR, Flathub, VSCodium's) and fetches pinned sources from their upstreams" \
+        || { say 'skipped  the third-party registry, on your no'; return 1; }
+    return 0
+}
+
+# Every entry: kept when already there, installed under the consent above,
+# skipped or unavailable with the reason said. A required entry still missing
+# at the end stops the install here, before anything of the desk is deployed.
+verb_third_party() {
+    local -a rows=() still_missing=()
+    local row type source name consent required pins description
+
+    section 'third party'
+    mapfile -t rows < <(tp_entries)
+    if (( ! ${#rows[@]} )); then return 0; fi
+
+    if ! tp_consent; then
+        if (( DRY )); then return 0; fi
+        for row in "${rows[@]}"; do
+            IFS=$'\t' read -r type source name consent required pins description <<< "$row"
+            if [[ $required == yes ]] && ! tp_have "$type" "$name" "$pins"; then
+                still_missing+=("$name")
+            fi
+        done
+        if (( ${#still_missing[@]} )); then
+            say "stopped  — ${still_missing[*]} are required, and without the answer above impasto will not install them"
+            say "         nothing has been deployed beyond the packages above; ./setup packages in a terminal asks again"
+            return 1
+        fi
+        return 0
+    fi
+
+    for row in "${rows[@]}"; do
+        IFS=$'\t' read -r type source name consent required pins description <<< "$row"
+        if tp_have "$type" "$name" "$pins"; then say "kept     $name"; continue; fi
+        if (( DRY )); then say "would    install $name ($type)"; continue; fi
+        case $consent in
+            optin)
+                say "optin    $name — not asked for here: $description"
+                continue ;;
+        esac
+        TP_NAME=$name TP_TYPE=$type TP_SOURCE=$source TP_DESC=$description
+        tp_pins "$pins"
+        tp_install "$type" "$source" "$name" "$pins" "$description"
+        case $? in
+            0) ;;
+            *) [[ $required == yes ]] && still_missing+=("$name") ;;
+        esac
+    done
+
+    if (( ${#still_missing[@]} )); then
+        say "stopped  — ${still_missing[*]} are required, and are not here: the desk would come up broken"
+        say "         nothing has been deployed beyond the packages above; sort the reason above, then ./setup packages again"
+        return 1
+    fi
 }
 
 # Creates the localised XDG folders (existing ones are never renamed). The
@@ -1009,6 +1492,10 @@ release_sudo() {
 }
 
 verb_plugins() {
+    if [[ $DISTRO == fedora ]]; then
+        say 'not ported  the Hyprland plugins are not built on Fedora yet; the port comes with the next stage'
+        return 0
+    fi
     section 'hyprland plugins'
     if ! hyprctl version >/dev/null 2>&1; then
         if (( ! DRY )); then mkdir -p "$STATE"; printf '%s\n' "$REPO" > "$PLUGINS_PENDING"; fi
@@ -1042,9 +1529,10 @@ verb_plugins() {
 # clicking a button that does nothing.
 
 # The entries of a package list as `section<TAB>package<TAB>what it is for`,
-# for those not installed. A section is a `# ── NAME ──` line.
+# for those not installed. A section is a `# ── NAME ──` line; the backend is
+# pacman unless dnf is named.
 missing_entries() {
-    local file=$1 line section= package comment
+    local file=$1 backend=${2:-pacman} line section= package comment row
     local -a entries=() wanted=()
     while IFS= read -r line; do
         if [[ $line =~ ^#\ ──\ (.+)\ ─+$ ]]; then section=${BASH_REMATCH[1]}; continue; fi
@@ -1055,7 +1543,19 @@ missing_entries() {
     done < "$file"
     (( ${#wanted[@]} )) || return 0
     local -A absent=()
-    while IFS= read -r package; do absent[$package]=1; done < <(pacman -T "${wanted[@]}" || true)
+    case $backend in
+        dnf)
+            local installed_groups
+            installed_groups=$(dnf group list --installed --quiet 2>/dev/null || true)
+            for row in "${wanted[@]}"; do
+                case $row in
+                    @*) grep -qw "${row#@}" <<< "$installed_groups" || absent[$row]=1 ;;
+                    *)  missing_dnf "$row" | grep -q . && absent[$row]=1 ;;
+                esac
+            done ;;
+        *)
+            while IFS= read -r package; do absent[$package]=1; done < <(pacman -T "${wanted[@]}" || true) ;;
+    esac
     for line in "${entries[@]}"; do
         package=${line#*$'\t'}; package=${package%%$'\t'*}
         if [[ -n ${absent[$package]:-} ]]; then printf '%s\n' "$line"; fi
@@ -1084,16 +1584,35 @@ verb_report() {
         say "nothing  this machine has the whole of impasto, not a shell-only install"
         return 0
     fi
-    local section package comment last names
-    for list in pacman aur; do
+    local section package comment last names row
+    if [[ $PKGMAN == dnf ]]; then
         names=()
         while IFS=$'\t' read -r section package comment; do
             names+=("$package")
-        done < <(missing_entries "$REPO/packages/$list.txt")
+        done < <(missing_entries "$REPO/packages/dnf.txt" dnf)
         if (( ${#names[@]} )); then
-            say "missing  ${#names[@]} $list package(s): ${names[*]} — ./setup packages"
+            say "missing  ${#names[@]} dnf package(s): ${names[*]} — ./setup packages"
         fi
-    done
+        names=()
+        local type source name consent required pins description
+        while IFS= read -r row; do
+            IFS=$'\t' read -r type source name consent required pins description <<< "$row"
+            tp_have "$type" "$name" "$pins" || names+=("$name")
+        done < <(tp_entries)
+        if (( ${#names[@]} )); then
+            say "missing  ${#names[@]} third-party: ${names[*]} — ./setup packages (asks before it enables external repositories)"
+        fi
+    else
+        for list in pacman aur; do
+            names=()
+            while IFS=$'\t' read -r section package comment; do
+                names+=("$package")
+            done < <(missing_entries "$REPO/packages/$list.txt")
+            if (( ${#names[@]} )); then
+                say "missing  ${#names[@]} $list package(s): ${names[*]} — ./setup packages"
+            fi
+        done
+    fi
     names=()
     while IFS=$'\t' read -r package comment; do names+=("~/$package"); done < <(skipped_groups)
     if (( ${#names[@]} )); then
@@ -1130,9 +1649,13 @@ verb_install() {
     verb_sync
     save_install_mode
     if (( SHELL_ONLY )); then verb_report; fi
-    if (( ! SKIP_SYSTEM )); then verb_system; fi
-    if (( ! SKIP_PLUGINS )); then verb_plugins; fi
-    if (( ! SKIP_EXTRAS )); then extras; fi
+    if [[ $DISTRO == fedora ]]; then
+        say 'not ported  sddm and printing, the plugins, the face, the camera and the splash come with the next stages of the Fedora port'
+    else
+        if (( ! SKIP_SYSTEM )); then verb_system; fi
+        if (( ! SKIP_PLUGINS )); then verb_plugins; fi
+        if (( ! SKIP_EXTRAS )); then extras; fi
+    fi
     section done "$(elapsed)"
     restore_shell
     if ! shell_up; then
@@ -1504,6 +2027,10 @@ ir_camera() {
 # can use it. Enrolling needs somebody in front of the camera, so an install
 # that cannot ask leaves it for this verb.
 verb_face() {
+    if [[ $DISTRO == fedora ]]; then
+        say 'not ported  howdy and the PAM rules are set up the Arch way; the Fedora port comes with a later stage'
+        return 0
+    fi
     section 'face unlock'
     command -v v4l2-ctl >/dev/null || refuse 'v4l2-ctl is not installed (package: v4l-utils)' || return
     local camera
@@ -1571,6 +2098,10 @@ CAMERA_FILES=(
 # a machine with a camera gets them. The models come from Google's own
 # storage, once, into the data directory.
 verb_camera() {
+    if [[ $DISTRO == fedora ]]; then
+        say 'not ported  the virtual camera and its effects are set up the Arch way; the Fedora port comes with a later stage'
+        return 0
+    fi
     section 'camera effects'
     command -v v4l2-ctl >/dev/null || refuse 'v4l2-ctl is not installed (package: v4l-utils)' || return
     local camera headers kernel
@@ -1634,6 +2165,10 @@ splash_argument() {
 # GRUB's `splash` is too; this names the theme, gives every other boot loader
 # the argument, and rebuilds the initramfs, which takes a minute.
 verb_splash() {
+    if [[ $DISTRO == fedora ]]; then
+        say 'not ported  the boot splash is wired with mkinitcpio on Arch; the Fedora port comes with a later stage'
+        return 0
+    fi
     section 'boot splash'
     [[ -z $ROOT ]] || refuse 'the boot splash is set up on the machine itself, not in a chroot' || return
     command -v plymouth-set-default-theme >/dev/null || refuse 'plymouth is not installed (package: plymouth)' || return
@@ -1731,6 +2266,77 @@ verb_check() {
     mapfile -t files < <(find home -name '*.toml')
     python3 -c 'import sys, tomllib; [tomllib.load(open(f, "rb")) for f in sys.argv[1:]]' "${files[@]}"
     say 'syntax ok'
+
+    # The package lists: every section parses, names are unique within a
+    # list, and the registry's seven fields are all there and shaped right —
+    # a tarball without its checksum, or a package in dnf.txt and the
+    # registry both, would otherwise only be found by an install failing
+    # midway.
+    section 'package lists'
+    python3 - "$REPO/packages" <<'EOF'
+import re, sys, pathlib
+
+root = pathlib.Path(sys.argv[1])
+failures = []
+
+SECTION = re.compile(r"^# ── (.+) ─+$")
+ENTRY = re.compile(r"^[ \t]*([A-Za-z0-9@._+-]+)[ \t]*(#[ \t]*(.*))?$")
+
+for name in ("pacman.txt", "aur.txt", "dnf.txt"):
+    seen = {}
+    section = ""
+    for i, line in enumerate((root / name).read_text(encoding="utf-8").splitlines(), 1):
+        if m := SECTION.match(line):
+            section = m.group(1)
+            continue
+        if m := ENTRY.match(line):
+            package = m.group(1)
+            if package in seen:
+                failures.append(f"{name}:{i}: {package} is listed twice ({seen[package]} and {section})")
+            seen[package] = section
+
+types = {"copr", "yumrepo", "rpm", "tarball", "source", "flatpak", "pip-venv", "npm", "optin"}
+consents = {"required", "optional", "optin"}
+registry = {}
+for i, line in enumerate((root / "fedora-third-party.txt").read_text(encoding="utf-8").splitlines(), 1):
+    if not line or line.startswith("#"):
+        continue
+    fields = line.split("\t")
+    if len(fields) != 7:
+        failures.append(f"fedora-third-party.txt:{i}: {len(fields)} fields, 7 wanted")
+        continue
+    kind, source, entry, consent, required, pins, description = fields
+    if kind not in types:
+        failures.append(f"fedora-third-party.txt:{i}: unknown type {kind!r}")
+    if consent not in consents:
+        failures.append(f"fedora-third-party.txt:{i}: unknown consent {consent!r}")
+    if required not in {"yes", "no"}:
+        failures.append(f"fedora-third-party.txt:{i}: required is {required!r}, yes or no")
+    if pins != "-" and not re.match(r"^[a-z0-9-]+=[^,]*(,[a-z0-9-]+=[^,]*)*$", pins):
+        failures.append(f"fedora-third-party.txt:{i}: pins are {pins!r}, want key=value pairs")
+    if kind == "copr" and "/" not in source:
+        failures.append(f"fedora-third-party.txt:{i}: a copr source is owner/project")
+    if kind == "tarball" and "sha256=" not in pins:
+        failures.append(f"fedora-third-party.txt:{i}: a tarball pins its sha256")
+    if kind == "source" and "tag=" not in pins and "commit=" not in pins:
+        failures.append(f"fedora-third-party.txt:{i}: a source pins a tag or a commit")
+    if kind == "rpm" and "sig=" not in pins:
+        failures.append(f"fedora-third-party.txt:{i}: an upstream rpm pins its signature, or its absence")
+    if entry in registry:
+        failures.append(f"fedora-third-party.txt:{i}: {entry} is listed twice")
+    registry[entry] = kind
+
+official = {m.group(1)
+            for line in (root / "dnf.txt").read_text(encoding="utf-8").splitlines()
+            if (m := ENTRY.match(line))}
+for entry in registry:
+    if entry in official:
+        failures.append(f"{entry} is in dnf.txt and the registry both: one source answers for it")
+
+if failures:
+    sys.exit("\n".join(failures))
+EOF
+    say 'lint ok'
 }
 
 
@@ -1863,8 +2469,14 @@ parts() {
         shell=1 on=(1 0 0 0)
     fi
     local -a helpers=(yay paru)
-    pacman=$(names "$REPO/packages/pacman.txt" | wc -l)
-    aur=$(names "$REPO/packages/aur.txt" | wc -l)
+    if [[ $PKGMAN == dnf ]]; then
+        pacman=$(names "$REPO/packages/dnf.txt" | wc -l)
+        aur=$(tp_entries | wc -l)
+        rows=4
+    else
+        pacman=$(names "$REPO/packages/pacman.txt" | wc -l)
+        aur=$(names "$REPO/packages/aur.txt" | wc -l)
+    fi
     # The one installed, as `aur_helper` would pick it.
     case $HELPER in
         paru) helper=1 ;;
@@ -1877,7 +2489,12 @@ parts() {
         for i in "${!PARTS[@]}"; do
             name=${PARTS[i]#*:}
             case ${PARTS[i]%%:*} in
-                packages) note="$pacman from the repositories, $aur from the AUR" ;;
+                packages)
+                    if [[ $PKGMAN == dnf ]]; then
+                        note="$pacman from the repositories, $aur third-party"
+                    else
+                        note="$pacman from the repositories, $aur from the AUR"
+                    fi ;;
                 system)   note='sddm, unless this machine already has one' ;;
                 plugins)  note='shake to find · glass on the windows' ;;
                 extras)   note='Nautilus, VSCodium, Vesktop, Spotify, GTK, your face, the camera, the boot splash' ;;
@@ -1895,17 +2512,19 @@ parts() {
             line "  ${FAINT}installed shell only · turn on any of the last three for everything$OFF"
             line ''
         fi
-        if (( helper == 0 )); then
-            pick="$ACCENT‹ yay ›$OFF   ${FAINT}paru$OFF"
-        else
-            pick="${FAINT}yay$OFF   $ACCENT‹ paru ›$OFF"
+        if (( rows == 5 )); then
+            if (( helper == 0 )); then
+                pick="$ACCENT‹ yay ›$OFF   ${FAINT}paru$OFF"
+            else
+                pick="${FAINT}yay$OFF   $ACCENT‹ paru ›$OFF"
+            fi
+            if (( at == 4 )); then
+                label="$TEXT$BOLD$(printf '%-18s' 'the AUR helper')$OFF"
+            else
+                label="$MUTED$(printf '%-18s' 'the AUR helper')$OFF"
+            fi
+            line "  $(here 4 "$at")    $label$pick"
         fi
-        if (( at == 4 )); then
-            label="$TEXT$BOLD$(printf '%-18s' 'the AUR helper')$OFF"
-        else
-            label="$MUTED$(printf '%-18s' 'the AUR helper')$OFF"
-        fi
-        line "  $(here 4 "$at")    $label$pick"
         line ''
         hint '↑↓:move' 'space:toggle' 'enter:install' 'q:quit'
         k=$(key) || k=quit
@@ -1920,7 +2539,7 @@ parts() {
                 SKIP_SYSTEM=$((   1 - on[1] ))
                 SKIP_PLUGINS=$((  1 - on[2] ))
                 SKIP_EXTRAS=$((   1 - on[3] ))
-                HELPER=${helpers[helper]}
+                if (( rows == 5 )); then HELPER=${helpers[helper]}; fi
                 if (( shell && (on[1] || on[2] || on[3]) )); then
                     SHELL_ONLY=0 MODE_GIVEN=1
                 fi
@@ -1999,6 +2618,13 @@ main() {
     case $HELPER in
         ''|yay|paru) ;;
         *) fail '--aur-helper takes yay or paru' ;;
+    esac
+    if (( ATOMIC == 1 )) && [[ $verb == install || $verb == update ]]; then
+        fail "Fedora Atomic (${PRETTY:-unknown}) is not supported: it manages the system as images, and impasto installs by files"
+    fi
+    case $verb in
+        install|update|packages)
+            [[ -n $PKGMAN ]] || fail "${PRETTY:-this distribution} is not one impasto installs itself on — Arch Linux and Fedora are" ;;
     esac
     case $verb in install|update|uninstall) banner ;; esac
     if (( DRY )) && [[ -z ${IMPASTO_RELAUNCHED:-} ]]; then
